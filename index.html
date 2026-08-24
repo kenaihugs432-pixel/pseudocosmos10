@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=0.5" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>AR com WebXR — pseudocosmos (fix)</title>
   <style>
     body{margin:0;overflow:hidden;font-family:sans-serif;background:#000;color:#fff}
@@ -120,7 +120,7 @@
     loader.load('adi.glb', (gltf) => {
       baseGLTF = gltf;
       modelPrototype = gltf.scene;
-      modelPrototype.scale.set(0.2,0.2,0.2);
+      modelPrototype.scale.set(0.5,0.5,0.5);
 
       // safe material fallbacks pra debug/visibilidade
       modelPrototype.traverse(n => {
