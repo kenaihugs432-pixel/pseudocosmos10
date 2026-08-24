@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>AR com WebXR — modelo fixo</title>
+
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: sans-serif;
+      background: #000;
+      color: #fff;
+    }
+
+    #message {
+      position: fixed;
+      left: 10px;
+      top: 10px;
+      z-index: 20;
+      background: rgba(255,255,255,.95);
+      color: #000;
+      padding: 8px 10px;
+      border-radius: 6px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.2);
+      max-width: calc(100% - 24px);
+    }
+
+    #errorBox {
+      position: fixed;
+      left: 10px;
+      bottom: 10px;
+      right: 10px;
+      z-index: 21;
+      background: rgba(0,0,0,.85);
+      color: #fff;
+      padding: 10px;
+      border-radius: 6px;
+      display: none;
+      max-height: 40vh;
+      overflow: auto;
+      font-family: monospace;
+      font-size: 13px;
+    }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.module.js",
+      "three/": "https://cdn.jsdelivr.net/npm/three@0.154.0/"
+    }
+  }
+  </script>
+
+  <script type="module"
+    src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js">
+  </script>
+</head>
+
+<body>
+  <div id="message">Carregando modelo…</div>
+  <div id="errorBox"></div>
+
+  <script type="module">
+  (async () => {
+    const showError = (txt) => {
+      const box = document.getElementById('errorBox');
+      box.style.display = 'block';
+      box.textContent += txt + "\\n\\n";
+      console.error(txt);
+    };
+
+    const setMessage = (txt) => {
+      document.getElementById('message').textContent = txt;
+    };
+
+    // =========================================================
+    // CONFIGURAÇÕES
+    // =========================================================
+
+    // Altura desejada do modelo em metros.
+    // 0.25 = 25 cm. Diminua para 0.20, 0.15 etc. se quiser menor.
+    const TARGET_MODEL_HEIGHT = 0.25;
+
+    // =========================================================
+    // CHECAGEM DO GLB
+    // =========================================================
+
+    try {
+      const head = await fetch('adi.glb', { method: 'HEAD' });
+
+      if (!head.ok) {
+        showError('adi.glb não encontrado (HTTP ' + head.status + ')');
+        setMessage('adi.glb não encontrado. Abra o fallback.');
+        return;
+      }
+    } catch (e) {
+      showError('Erro checando adi.glb: ' + e);
+      return;
+    }
+
+    // =========================================================
+    // IMPORTS
+    // =========================================================
+
+    let THREE, GLTFLoaderModule, ARButtonModule, SkeletonUtilsModule;
+
+    try {
+      THREE = await import('three');
+
+      GLTFLoaderModule = await import(
+        'https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/loaders/GLTFLoader.js'
+      );
+
+      ARButtonModule = await import(
+        'https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/webxr/ARButton.js'
+      );
+
+      SkeletonUtilsModule = await import(
+        'https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/utils/SkeletonUtils.js'
+      );
+    } catch (err) {
+      showError('Falha ao carregar libs via CDN/importmap: ' + err);
+      setMessage('Erro carregando libs. Abra o fallback.');
+      return;
+    }
+
+    const { GLTFLoader } = GLTFLoaderModule;
+    const { ARButton } = ARButtonModule;
+
+    let SkeletonUtils =
+      SkeletonUtilsModule.SkeletonUtils ||
+      SkeletonUtilsModule.default ||
+      SkeletonUtilsModule;
+
+    if (!SkeletonUtils || typeof SkeletonUtils.clone !== 'function') {
+      console.warn('SkeletonUtils indisponível. Usando clone simples.');
+      SkeletonUtils = null;
+    }
+
+    // =========================================================
+    // RENDERER / CÂMERA
+    // =========================================================
+
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true
+    });
+
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+
+    renderer.xr.enabled = true;
+
+    if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) {
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+    } else if ('outputEncoding' in renderer) {
+      renderer.outputEncoding = THREE.sRGBEncoding;
+    }
+
+    if ('useLegacyLights' in renderer) {
+      renderer.useLegacyLights = false;
+    }
+
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.4;
+
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.PerspectiveCamera(
+      70,
+      window.innerWidth / window.innerHeight,
+      0.01,
+      30
+    );
+
+    // Pede ao Three para trabalhar preferencialmente em espaço
+    // relativo ao chão. Isso é mais apropriado para objetos de AR
+    // que devem permanecer no lugar enquanto o usuário anda.
+    renderer.xr.setReferenceSpaceType('local-floor');
+
+    // =========================================================
+    // ILUMINAÇÃO
+    // =========================================================
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.6));
+
+    const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+    dir.position.set(1, 2, 1);
+    scene.add(dir);
+
+    // =========================================================
+    // RETÍCULO DE HIT-TEST
+    // =========================================================
+
+    const ringGeometry =
+      new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI / 2);
+
+    const ringMaterial =
+      new THREE.MeshBasicMaterial({ color: 0x00ff88 });
+
+    const reticle = new THREE.Mesh(ringGeometry, ringMaterial);
+
+    reticle.matrixAutoUpdate = false;
+    reticle.visible = false;
+
+    scene.add(reticle);
+
+    // =========================================================
+    // GLTF
+    // =========================================================
+
+    const loader = new GLTFLoader();
+
+    let baseGLTF = null;
+    let modelPrototype = null;
+    let modelReady = false;
+
+    // Apenas um modelo colocado no ambiente.
+    let placedModel = null;
+
+    loader.load(
+      'adi.glb',
+
+      (gltf) => {
+        baseGLTF = gltf;
+        modelPrototype = gltf.scene;
+
+        // -----------------------------------------------------
+        // NORMALIZAÇÃO DE TAMANHO
+        // -----------------------------------------------------
+        //
+        // Em vez de usar simplesmente scale = 0.5, calculamos
+        // a altura real do modelo e ajustamos para um tamanho
+        // previsível em metros.
+        //
+
+        const originalBox = new THREE.Box3().setFromObject(modelPrototype);
+        const originalSize = new THREE.Vector3();
+        originalBox.getSize(originalSize);
+
+        if (originalSize.y > 0) {
+          const scaleFactor =
+            TARGET_MODEL_HEIGHT / originalSize.y;
+
+          modelPrototype.scale.setScalar(scaleFactor);
+        }
+
+        // Materiais
+        modelPrototype.traverse((n) => {
+          if (!n.isMesh || !n.material) return;
+
+          n.material.side = THREE.DoubleSide;
+
+          if (
+            n.material.metalness !== undefined &&
+            n.material.metalness > 0.9
+          ) {
+            n.material.metalness = 0.6;
+          }
+
+          if (
+            n.material.roughness !== undefined &&
+            n.material.roughness < 0.1
+          ) {
+            n.material.roughness = 0.5;
+          }
+
+          [
+            'map',
+            'normalMap',
+            'metalnessMap',
+            'roughnessMap',
+            'emissiveMap'
+          ].forEach((key) => {
+            if (!n.material[key]) return;
+
+            const tex = n.material[key];
+
+            if ('colorSpace' in tex && THREE.SRGBColorSpace) {
+              tex.colorSpace = THREE.SRGBColorSpace;
+            } else if ('encoding' in tex) {
+              tex.encoding = THREE.sRGBEncoding;
+            }
+          });
+
+          n.material.needsUpdate = true;
+        });
+
+        console.log(
+          'Modelo carregado.',
+          'Animações:',
+          gltf.animations.length,
+          gltf.animations.map((a) => a.name)
+        );
+
+        modelReady = true;
+
+        setMessage(
+          'Modelo carregado. Toque em START AR, aponte para uma superfície e toque para colocar o modelo.'
+        );
+      },
+
+      undefined,
+
+      (err) => {
+        showError('Erro carregando adi.glb: ' + err);
+      }
+    );
+
+    // =========================================================
+    // iOS — QUICK LOOK
+    // =========================================================
+
+    const usdzUrl = new URL('adi.usdz', location.href).href;
+
+    function isIOS() {
+      return /iP(hone|od|ad)/.test(navigator.platform) ||
+        (
+          navigator.userAgent.includes('Mac') &&
+          'ontouchend' in document
+        );
+    }
+
+    if (isIOS()) {
+      const arLink = document.createElement('a');
+
+      arLink.href = usdzUrl;
+      arLink.setAttribute('rel', 'ar');
+
+      Object.assign(arLink.style, {
+        position: 'fixed',
+        left: '10px',
+        bottom: '10px',
+        zIndex: '40',
+        padding: '10px 14px',
+        background: '#0b84ff',
+        color: '#fff',
+        borderRadius: '8px',
+        textDecoration: 'none'
+      });
+
+      arLink.textContent = 'Abrir AR (iOS Quick Look)';
+      document.body.appendChild(arLink);
+
+      setMessage(
+        'iOS detectado — use "Abrir AR (iOS Quick Look)".'
+      );
+    }
+
+    // =========================================================
+    // ANIMAÇÃO
+    // =========================================================
+
+    const mixers = [];
+    const clock = new THREE.Clock();
+
+    // =========================================================
+    // AR
+    // =========================================================
+
+    let hitTestSource = null;
+    let hitTestSourceRequested = false;
+
+    const controller = renderer.xr.getController(0);
+
+    controller.addEventListener('select', () => {
+      if (!modelReady) {
+        setMessage('O modelo ainda está carregando.');
+        return;
+      }
+
+      if (!reticle.visible) {
+        setMessage('Aponte a câmera para uma superfície até o anel aparecer.');
+        return;
+      }
+
+      // -------------------------------------------------------
+      // Se já existe um modelo, NÃO reposicionamos.
+      // Isso é importante: um segundo toque não faz o modelo
+      // "seguir" a câmera novamente.
+      // -------------------------------------------------------
+
+      if (placedModel) {
+        setMessage('Modelo já colocado. Ande para longe dele para vê-lo parado.');
+        return;
+      }
+
+      try {
+        const clone = SkeletonUtils
+          ? SkeletonUtils.clone(modelPrototype)
+          : modelPrototype.clone(true);
+
+        // =====================================================
+        // POSIÇÃO INICIAL
+        // =====================================================
+
+        clone.position.setFromMatrixPosition(reticle.matrix);
+        clone.quaternion.setFromRotationMatrix(reticle.matrix);
+
+        // =====================================================
+        // AJUSTE PARA ENCOSTAR NO CHÃO
+        // =====================================================
+
+        scene.add(clone);
+
+        const worldBox = new THREE.Box3().setFromObject(clone);
+
+        // A posição Y usada pelo hit-test é a altura da superfície.
+        const surfaceY = clone.position.y;
+
+        // Corrige modelos cujo "origin" está no meio ou acima
+        // dos pés.
+        clone.position.y += surfaceY - worldBox.min.y;
+
+        // =====================================================
+        // CONGELAMENTO DA TRANSFORMAÇÃO
+        // =====================================================
+        //
+        // Depois que o usuário coloca o modelo, transformamos
+        // a pose atual em uma matriz fixa.
+        //
+        // Assim, o mixer pode continuar animando o personagem,
+        // mas a posição/rotação do objeto não muda junto da câmera.
+        //
+
+        clone.updateMatrix();
+        clone.matrixAutoUpdate = false;
+
+        placedModel = clone;
+
+        // =====================================================
+        // ANIMAÇÃO
+        // =====================================================
+
+        if (
+          baseGLTF &&
+          baseGLTF.animations &&
+          baseGLTF.animations.length
+        ) {
+          const mixer = new THREE.AnimationMixer(clone);
+
+          for (const clip of baseGLTF.animations) {
+            mixer.clipAction(clip).play();
+          }
+
+          mixers.push(mixer);
+        }
+
+        // =====================================================
+        // PODE PARAR O HIT-TEST
+        // =====================================================
+        //
+        // O retículo deixa de ser necessário depois da colocação.
+        // Parar o hit-test também elimina qualquer possibilidade
+        // de a lógica de posicionamento interferir depois.
+        //
+
+        reticle.visible = false;
+
+        if (hitTestSource) {
+          try {
+            hitTestSource.cancel();
+          } catch (_) {}
+          hitTestSource = null;
+        }
+
+        setMessage(
+          'Modelo colocado. Agora você pode andar para trás: ele permanece parado no ambiente.'
+        );
+
+        console.log('Modelo colocado e transformação congelada.');
+      } catch (e) {
+        showError('Falha ao colocar o modelo: ' + e);
+      }
+    });
+
+    scene.add(controller);
+
+    // =========================================================
+    // LOOP AR + HIT-TEST
+    // =========================================================
+
+    const tmpMatrix = new THREE.Matrix4();
+
+    renderer.setAnimationLoop((timestamp, frame) => {
+      const delta = clock.getDelta();
+
+      // A animação continua normalmente.
+      for (const mixer of mixers) {
+        mixer.update(delta);
+      }
+
+      if (frame) {
+        const session = renderer.xr.getSession();
+        const referenceSpace = renderer.xr.getReferenceSpace();
+
+        // Cria o hit-test uma única vez por sessão.
+        if (
+          session &&
+          !hitTestSourceRequested &&
+          !placedModel
+        ) {
+          hitTestSourceRequested = true;
+
+          session
+            .requestReferenceSpace('viewer')
+            .then((viewerSpace) => {
+              return session.requestHitTestSource({
+                space: viewerSpace
+              });
+            })
+            .then((source) => {
+              hitTestSource = source;
+            })
+            .catch((e) => {
+              console.warn('Hit-test não disponível:', e);
+              hitTestSourceRequested = false;
+            });
+        }
+
+        // Enquanto nenhum modelo foi colocado, atualiza o retículo.
+        if (
+          hitTestSource &&
+          !placedModel &&
+          referenceSpace
+        ) {
+          const results =
+            frame.getHitTestResults(hitTestSource);
+
+          if (results.length > 0) {
+            const hit = results[0];
+
+            const pose =
+              hit.getPose(referenceSpace);
+
+            if (pose) {
+              tmpMatrix.fromArray(pose.transform.matrix);
+
+              reticle.matrix.copy(tmpMatrix);
+              reticle.visible = true;
+            }
+          } else {
+            reticle.visible = false;
+          }
+        }
+      }
+
+      renderer.render(scene, camera);
+    });
+
+    // =========================================================
+    // RESIZE
+    // =========================================================
+
+    window.addEventListener('resize', () => {
+      camera.aspect =
+        window.innerWidth / window.innerHeight;
+
+      camera.updateProjectionMatrix();
+
+      renderer.setSize(
+        window.innerWidth,
+        window.innerHeight
+      );
+    });
+
+    // =========================================================
+    // BOTÃO START AR
+    // =========================================================
+
+    if (!isIOS()) {
+      try {
+        document.body.appendChild(
+          ARButton.createButton(renderer, {
+            requiredFeatures: ['hit-test'],
+            optionalFeatures: ['local-floor']
+          })
+        );
+      } catch (e) {
+        showError('Erro criando botão AR: ' + e);
+      }
+    }
+  })();
+  </script>
+</body>
+</html>
